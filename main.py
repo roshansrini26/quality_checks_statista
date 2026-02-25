@@ -7,13 +7,13 @@ from datetime import datetime
 df = pd.read_excel("/Users/roshans/Documents/Projects/quality_checks_statista/dataset/CaseStudy_Quality_sample25.xlsx")
 df['providerkey'] = df['providerkey'].astype(str)
 
-# Helper: detect full datetime in fiscalperiodend
+# To detect fiscalperiodend format correctness
 def check_datetime(val):
     return isinstance(val, datetime) or (not pd.isnull(val) and hasattr(val, 'year'))
 
 df['is_datetime'] = df['fiscalperiodend'].apply(check_datetime)
 
-# ── CHECK 1: COMPLETENESS ──────────────────────────────────
+#Quality check 1: Completeness
 imp_cols = ['companynameofficial', 'REVENUE', 'unit_REVENUE', 'fiscalperiodend', 'geonameen', 'industrycode']
 
 df['flag_completeness'] = df[imp_cols].isnull().any(axis=1)
@@ -23,7 +23,7 @@ df['flag_completeness_info'] = df.apply(
     axis=1
 )
 
-# ── CHECK 2: CONSISTENCY ───────────────────────────────────
+#Quality check 2: Consistency
 df['flag_consistency_fiscalperiodend'] = df['is_datetime']
 df['flag_consistency_revenue_unit'] = (
     (df['REVENUE'].notna() & df['unit_REVENUE'].isnull()) |
@@ -38,7 +38,7 @@ df['flag_consistency_info'] = df.apply(
 )
 df.drop(columns=['flag_consistency_fiscalperiodend', 'flag_consistency_revenue_unit'], inplace=True)
 
-# ── CHECK 3: UNIQUENESS ────────────────────────────────────
+#Quality check 3: Uniquness
 df['flag_uniqueness'] = df.duplicated(subset=['providerkey', 'timevalue'], keep=False)
 df['flag_uniqueness_info'] = df.apply(
     lambda r: f"duplicate entry: providerkey={r['providerkey']} timevalue={r['timevalue']}"
@@ -46,7 +46,7 @@ df['flag_uniqueness_info'] = df.apply(
     axis=1
 )
 
-# ── CHECK 4: PLAUSIBILITY ──────────────────────────────────
+#Quality check 4: Plausibility 
 df['flag_plausibility_negative'] = df['REVENUE'].notna() & (df['REVENUE'] < 0)
 
 def iqr_flag(grp):
@@ -84,23 +84,13 @@ df['flag_plausibility_info'] = df.apply(
 )
 df.drop(columns=['flag_plausibility_negative', 'flag_plausibility_iqr', 'flag_plausibility_yoy'], inplace=True)
 
-# ── CHECK 5: LLM-BASED ANOMALY ────────────────────────────
-# Uses prompt engineering logic with domain knowledge
-# to detect currency mismatches and revenue anomalies per company
+#Quality check 5: Rule/LLM based 
 COUNTRY_CURRENCY = {
     'United Kingdom': ['GBP'], 'Sweden':       ['SEK'], 'Denmark':     ['DKK'],
     'India':          ['INR'], 'United States': ['USD'], 'Indonesia':   ['IDR'],
-    'France':         ['EUR'], 'Germany':       ['EUR'], 'Italy':       ['EUR'],
-    'Spain':          ['EUR'], 'Netherlands':   ['EUR'],
 }
 
-def llm_anomaly_check(company, country, grp):
-    """
-    Simulates LLM prompt engineering logic:
-    - Checks if currency matches the company's country
-    - Flags zero revenue years
-    - Flags identical revenue across all years (extraction error)
-    """
+def rule_anomaly_check(company, country, grp):
     issues = []
     expected = COUNTRY_CURRENCY.get(country)
     units = grp['unit_REVENUE'].dropna().unique()
@@ -110,28 +100,25 @@ def llm_anomaly_check(company, country, grp):
             issues.append(f"currency mismatch: {country} expects {expected} but found {bad}")
     valid_rev = grp['REVENUE'].dropna()
     if len(valid_rev[valid_rev == 0]) > 0:
-        issues.append(f"zero revenue in {len(valid_rev[valid_rev == 0])} year(s)")
+        issues.append(f"zero revenue in {len(valid_rev[valid_rev == 0])} year (s)")
     if len(valid_rev) >= 3 and valid_rev.nunique() == 1:
-        issues.append("revenue identical across all years (possible extraction error)")
+        issues.append("revenue identical across all years")
     return (True, ' | '.join(issues)) if issues else (False, '')
 
-print("Running LLM anomaly checks per company...")
-llm_results = {}
+rule_results = {}
 for pk, grp in df.groupby('providerkey'):
     company = grp['companynameofficial'].dropna().iloc[0] if grp['companynameofficial'].notna().any() else 'Unknown'
     country = grp['geonameen'].iloc[0]
-    result  = llm_anomaly_check(company, country, grp)
-    llm_results[pk] = result
-    if result[0]:
-        print(f"  ⚠ {company}: {result[1]}")
+    result  = rule_anomaly_check(company, country, grp)
+    rule_results[pk] = result
 
-df['flag_llm_anomaly']      = df['providerkey'].map(lambda pk: llm_results.get(pk, (False, ''))[0])
-df['flag_llm_anomaly_info'] = df['providerkey'].map(lambda pk: llm_results.get(pk, (False, ''))[1])
+df['flag_rule_anomaly']      = df['providerkey'].map(lambda pk: rule_results.get(pk, (False, ''))[0])
+df['flag_rule_anomaly_info'] = df['providerkey'].map(lambda pk: rule_results.get(pk, (False, ''))[1])
 
-# ── MASTER FLAG + OUTPUT ───────────────────────────────────
+#Output flag
 df['flag_any_issue'] = (
     df['flag_completeness'] | df['flag_consistency'] |
-    df['flag_plausibility'] | df['flag_uniqueness']  | df['flag_llm_anomaly']
+    df['flag_plausibility'] | df['flag_uniqueness']  | df['flag_rule_anomaly']
 )
 
 out_cols = [
@@ -141,21 +128,21 @@ out_cols = [
     'flag_consistency',   'flag_consistency_info',
     'flag_plausibility',  'flag_plausibility_info',
     'flag_uniqueness',    'flag_uniqueness_info',
-    'flag_llm_anomaly',   'flag_llm_anomaly_info',
+    'flag_rule_anomaly',   'flag_rule_anomaly_info',
     'flag_any_issue'
 ]
 
 df[out_cols].to_excel("/Users/roshans/Documents/Projects/quality_checks_statista/dataset/output_CaseStudy.xlsx", index=False)
 
-print(f"\n{'='*55}")
+
 print(f"QUALITY CHECK SUMMARY  |  Total rows: {len(df)}")
 print(f"{'='*55}")
 for flag, label in [
-    ('flag_completeness', 'Completeness (missing fields)'),
-    ('flag_consistency',  'Consistency  (format / unit mismatch)'),
-    ('flag_plausibility', 'Plausibility (negative / IQR / YoY)'),
-    ('flag_uniqueness',   'Uniqueness   (duplicate company+year)'),
-    ('flag_llm_anomaly',  'LLM Anomaly  (currency / zero / pattern)'),
-    ('flag_any_issue',    'ANY ISSUE    (total flagged)'),
+    ('flag_completeness', 'Completeness '),
+    ('flag_consistency',  'Consistency  '),
+    ('flag_plausibility', 'Plausibility '),
+    ('flag_uniqueness',   'Uniqueness   '),
+    ('flag_rule_anomaly',  'LLM Anomaly '),
+    ('flag_any_issue',    'ANY ISSUE    '),
 ]:
     print(f"  {label:<45}: {df[flag].sum():>4} rows")
